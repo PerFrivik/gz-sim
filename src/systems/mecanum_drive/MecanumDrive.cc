@@ -20,6 +20,7 @@
 #include <gz/msgs/odometry.pb.h>
 #include <gz/msgs/pose_v.pb.h>
 #include <gz/msgs/twist.pb.h>
+#include <gz/msgs10/actuators.pb.h>
 
 #include <limits>
 #include <mutex>
@@ -66,11 +67,22 @@ class gz::sim::systems::MecanumDrivePrivate
   /// \param[in] _msg Velocity message
   public: void OnCmdVel(const gz::msgs::Twist &_msg);
 
+  /// \brief Callback for individual wheel speed subscription 
+  /// \param[in] _msg Individual wheel speed message
+  public: void OnWheelSpeed(const gz::msgs::Actuators &_msg);
+
   /// \brief Update the linear and angular velocities.
   /// \param[in] _info System update information.
   /// \param[in] _ecm The EntityComponentManager of the given simulation
   /// instance.
   public: void UpdateVelocity(const gz::sim::UpdateInfo &_info,
+    const gz::sim::EntityComponentManager &_ecm);
+
+  /// \brief Update the individual wheel speeds.
+  /// \param[in] _info System update information.
+  /// \param[in] _ecm The EntityComponentManager of the given simulation
+  /// instance.
+  public: void UpdateWheelSpeed(const gz::sim::UpdateInfo &_info,
     const gz::sim::EntityComponentManager &_ecm);
 
   /// \brief Gazebo communication node.
@@ -165,6 +177,9 @@ class gz::sim::systems::MecanumDrivePrivate
 
   /// \brief child_frame_id from sdf.
   public: std::string sdfChildFrameId;
+
+  /// \brief boolean for individual wheel speed subscription
+  public: bool individualWheelSpeed{false};
 };
 
 //////////////////////////////////////////////////
@@ -221,53 +236,51 @@ void MecanumDrive::Configure(const Entity &_entity,
     sdfElem = sdfElem->GetNextElement("back_right_joint");
   }
 
-  this->dataPtr->wheelSeparation = _sdf->Get<double>("wheel_separation",
-      this->dataPtr->wheelSeparation).first;
-  this->dataPtr->wheelbase = _sdf->Get<double>("wheelbase",
-      this->dataPtr->wheelbase).first;
-  this->dataPtr->wheelRadius = _sdf->Get<double>("wheel_radius",
-      this->dataPtr->wheelRadius).first;
+  // custom code for individual wheel speed
+  if (_sdf->HasElement("individual_wheel_speed"))
+  {
+    this->dataPtr->individualWheelSpeed = _sdf->Get<bool>("individual_wheel_speed",
+        this->dataPtr->individualWheelSpeed).first;
+  } 
 
-  // Instantiate the speed limiters.
-  this->dataPtr->limiterLin = std::make_unique<gz::math::SpeedLimiter>();
-  this->dataPtr->limiterAng = std::make_unique<gz::math::SpeedLimiter>();
+  if (!this->dataPtr->individualWheelSpeed) // This will run if individualWheelSpeed is false
+  {
+    this->dataPtr->wheelSeparation = _sdf->Get<double>("wheel_separation",
+        this->dataPtr->wheelSeparation).first;
+    this->dataPtr->wheelbase = _sdf->Get<double>("wheelbase",
+        this->dataPtr->wheelbase).first;
+    this->dataPtr->wheelRadius = _sdf->Get<double>("wheel_radius",
+        this->dataPtr->wheelRadius).first;
 
-  // Parse speed limiter parameters.
-  if (_sdf->HasElement("min_velocity"))
-  {
-    double minVel = _sdf->Get<double>("min_velocity");
-    this->dataPtr->limiterLin->SetMinVelocity(minVel);
-    this->dataPtr->limiterAng->SetMinVelocity(minVel);
-  }
-  if (_sdf->HasElement("max_velocity"))
-  {
-    double maxVel = _sdf->Get<double>("max_velocity");
-    this->dataPtr->limiterLin->SetMaxVelocity(maxVel);
-    this->dataPtr->limiterAng->SetMaxVelocity(maxVel);
-  }
-  if (_sdf->HasElement("min_acceleration"))
-  {
-    double minAccel = _sdf->Get<double>("min_acceleration");
-    this->dataPtr->limiterLin->SetMinAcceleration(minAccel);
-    this->dataPtr->limiterAng->SetMinAcceleration(minAccel);
-  }
-  if (_sdf->HasElement("max_acceleration"))
-  {
-    double maxAccel = _sdf->Get<double>("max_acceleration");
-    this->dataPtr->limiterLin->SetMaxAcceleration(maxAccel);
-    this->dataPtr->limiterAng->SetMaxAcceleration(maxAccel);
-  }
-  if (_sdf->HasElement("min_jerk"))
-  {
-    double minJerk = _sdf->Get<double>("min_jerk");
-    this->dataPtr->limiterLin->SetMinJerk(minJerk);
-    this->dataPtr->limiterAng->SetMinJerk(minJerk);
-  }
-  if (_sdf->HasElement("max_jerk"))
-  {
-    double maxJerk = _sdf->Get<double>("max_jerk");
-    this->dataPtr->limiterLin->SetMaxJerk(maxJerk);
-    this->dataPtr->limiterAng->SetMaxJerk(maxJerk);
+    // Instantiate the speed limiters.
+    this->dataPtr->limiterLin = std::make_unique<gz::math::SpeedLimiter>();
+    this->dataPtr->limiterAng = std::make_unique<gz::math::SpeedLimiter>();
+
+    // Parse speed limiter parameters.
+    if (_sdf->HasElement("min_velocity"))
+    {
+      double minVel = _sdf->Get<double>("min_velocity");
+      this->dataPtr->limiterLin->SetMinVelocity(minVel);
+      this->dataPtr->limiterAng->SetMinVelocity(minVel);
+    }
+    if (_sdf->HasElement("max_velocity"))
+    {
+      double maxVel = _sdf->Get<double>("max_velocity");
+      this->dataPtr->limiterLin->SetMaxVelocity(maxVel);
+      this->dataPtr->limiterAng->SetMaxVelocity(maxVel);
+    }
+    if (_sdf->HasElement("min_acceleration"))
+    {
+      double minAccel = _sdf->Get<double>("min_acceleration");
+      this->dataPtr->limiterLin->SetMinAcceleration(minAccel);
+      this->dataPtr->limiterAng->SetMinAcceleration(minAccel);
+    }
+    if (_sdf->HasElement("max_acceleration"))
+    {
+      double maxAccel = _sdf->Get<double>("max_acceleration");
+      this->dataPtr->limiterLin->SetMaxAcceleration(maxAccel);
+      this->dataPtr->limiterAng->SetMaxAcceleration(maxAccel);
+    }
   }
 
   double odomFreq = _sdf->Get<double>("odom_publish_frequency", 50).first;
@@ -284,15 +297,30 @@ void MecanumDrive::Configure(const Entity &_entity,
 
   // Subscribe to commands
   std::vector<std::string> topics;
+  // changes to do here, I am not quire sure, why we need two pushbacks, is it incase if the user provides no topic?
   if (_sdf->HasElement("topic"))
   {
     topics.push_back(_sdf->Get<std::string>("topic"));
   }
-  topics.push_back("/model/" + this->dataPtr->model.Name(_ecm) + "/cmd_vel");
-  auto topic = validTopic(topics);
 
-  this->dataPtr->node.Subscribe(topic, &MecanumDrivePrivate::OnCmdVel,
+  if (!this->dataPtr->individualWheelSpeed)
+  {
+    topics.push_back("/model/" + this->dataPtr->model.Name(_ecm) + "/cmd_vel");
+  } else if (this->dataPtr->individualWheelSpeed){
+    topics.push_back("/model/" + this->dataPtr->model.Name(_ecm) + "/command/motor_speed");
+  }
+
+
+  auto topic = validTopic(topics);
+  // check everywhere and make sure the reihenfolge is consistent
+  if (this->dataPtr->individualWheelSpeed)
+  {
+    this->dataPtr->node.Subscribe(topic, &MecanumDrivePrivate::OnWheelSpeed,
       this->dataPtr.get());
+  } else {
+    this->dataPtr->node.Subscribe(topic, &MecanumDrivePrivate::OnCmdVel,
+        this->dataPtr.get());
+  }
 
   std::vector<std::string> odomTopics;
   if (_sdf->HasElement("odom_topic"))
@@ -318,6 +346,7 @@ void MecanumDrive::Configure(const Entity &_entity,
 
   if (_sdf->HasElement("child_frame_id"))
     this->dataPtr->sdfChildFrameId = _sdf->Get<std::string>("child_frame_id");
+
 
   gzmsg << "MecanumDrive subscribing to twist messages on [" << topic << "]"
          << std::endl;
@@ -497,9 +526,50 @@ void MecanumDrive::PostUpdate(const UpdateInfo &_info,
   // Nothing left to do if paused.
   if (_info.paused)
     return;
-
-  this->dataPtr->UpdateVelocity(_info, _ecm);
+  if (this->dataPtr->individualWheelSpeed)
+  {
+    this->dataPtr->UpdateWheelSpeed(_info, _ecm);
+  } else {
+    // this->dataPtr->UpdateVelocity(_info, _ecm);
+    return;
+  }
 }
+
+// void MecanumDrivePrivate::UpdateWheelSpeed(
+//     const gz::sim::UpdateInfo &_info,
+//     const gz::sim::EntityComponentManager &_ecm)
+// {
+//   GZ_PROFILE("MecanumDrive::UpdateWheelSpeed");
+
+//   double frontLeftJointSpeed;
+//   double frontRightJointSpeed;
+//   double backLeftJointSpeed;
+//   double backRightJointSpeed;
+//   {
+//     std::lock_guard<std::mutex> lock(this->mutex);
+//     frontLeftJointSpeed = this->frontLeftJointSpeed;
+//     frontRightJointSpeed = this->frontRightJointSpeed;
+//     backLeftJointSpeed = this->backLeftJointSpeed;
+//     backRightJointSpeed = this->backRightJointSpeed;
+//   }
+
+//   // Limit the target velocity if needed.
+//   this->limiterLin->Limit(
+//       frontLeftJointSpeed, this->last0Cmd.lin, this->last1Cmd.lin, _info.dt);
+//   this->limiterLin->Limit(
+//       frontRightJointSpeed, this->last0Cmd.lat, this->last1Cmd.lat, _info.dt);
+//   this->limiterAng->Limit(
+//       backLeftJointSpeed, this->last0Cmd.ang, this->last1Cmd.ang, _info.dt);
+//   this->limiterAng->Limit(
+//       backRightJointSpeed, this->last0Cmd.ang, this->last1Cmd.ang, _info.dt);
+
+//   // Update history of commands.
+//   this->last1Cmd = last0Cmd;
+//   this->last0Cmd.lin = frontLeftJointSpeed;
+//   this->last0Cmd.lat = frontRightJointSpeed;
+//   this->last0Cmd.ang = backLeftJointSpeed;
+//   this->last0Cmd.ang = backRightJointSpeed;
+// }
 
 //////////////////////////////////////////////////
 void MecanumDrivePrivate::UpdateVelocity(
@@ -555,6 +625,16 @@ void MecanumDrivePrivate::OnCmdVel(const msgs::Twist &_msg)
 {
   std::lock_guard<std::mutex> lock(this->mutex);
   this->targetVel = _msg;
+}
+
+void MecanumDrivePrivate::OnWheelSpeed(const msgs::Actuators &_msg)
+{
+  std::lock_guard<std::mutex> lock(this->mutex);
+  // still need to come up with a convention for the order of the wheels
+  this->frontLeftJointSpeed = _msg.velocity(0);
+  this->frontRightJointSpeed = _msg.velocity(1);
+  this->backLeftJointSpeed = _msg.velocity(2);
+  this->backRightJointSpeed = _msg.velocity(3);
 }
 
 GZ_ADD_PLUGIN(MecanumDrive,
